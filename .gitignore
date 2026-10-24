@@ -1,0 +1,13 @@
+Debug/
+Release/
+*.elf
+*.map
+*.list
+*.hex
+*.bin
+*.o
+*.d
+*.su
+*.cyclo
+.settings/
+.metadata/

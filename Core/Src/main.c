@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "FreeRTOS.h"
+#include "cmsis_os2.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -85,6 +87,13 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_rx;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 __attribute__((aligned(32)))
 static uint8_t stim_rx[RX_BUF_SIZE];          // DMA writes STIM300 bytes here (circular)
@@ -122,6 +131,8 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 static void stim_feed(const uint8_t *data, uint16_t len);
 static void stim_decode(const uint8_t *frame, stim_sample_t *out);
@@ -182,7 +193,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
   setvbuf(stdout, NULL, _IONBF, 0);       // turn off printf buffering so text appears immediately
   printf("\r\nSTIM300 test start\r\n");   // board booted and printf works
-  //crc
   printf("CRC self-test: %s\r\n", stim_frame_crc_ok(stim_test_frame) ? "PASS" : "FAIL");
   printf("s24 test: %ld %ld\r\n", (long)stim_s24(&stim_test_frame[1]), (long)stim_s24(&stim_test_frame[7]));
   stim_sample_t t;
@@ -190,16 +200,44 @@ int main(void)
   printf("decode test: accZ %ld inclZ %ld gyroT_X %d lat %u cnt %u valid %u\r\n",
          (long)t.accel.xyz[2], (long)t.incl.xyz[2], (int)t.gyro_temp.xyz[0],
          (unsigned)t.latency_us, (unsigned)t.counter, (unsigned)t.valid);
-  // next two lines fixes uart error at startup..
-  __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);  // throw away the stale byte sitting in RDR
-  __HAL_UART_CLEAR_OREFLAG(&huart2);                        // clear the overrun flag left over from before
-  //Start USART2 reception with circular DMA + idle-line detection (runs forever)
-  if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, stim_rx, RX_BUF_SIZE) != HAL_OK)
-  {
-    printf("DMA start failed\r\n");
-  }//georg
-  uint32_t t_last = HAL_GetTick();        // current time in ms, for the 1 s status print
+  // STIM reception is started in StartDefaultTask(), once the RTOS is running
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -207,25 +245,10 @@ int main(void)
   {
     /* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
-    if (HAL_GetTick() - t_last >= 1000)
-    {
-      t_last += 1000;
-      uint32_t n = stim_bytes;
-      stim_bytes = 0;
-      uint32_t f = stim_frames;
-      stim_frames = 0;
-      //printf("STIM: %lu bytes/s, %lu frames/s, errors: %lu\r\n", n, f, stim_errors);
-      //crc
-      printf("STIM: %lu bytes/s, %lu frames/s, crc errors: %lu, uart errors: %lu\r\n",
-             n, f, stim_crc_errors, stim_errors);
-      printf("  accZ %ld  inclZ %ld  gyroT_X %d  lat %u  cnt %u  valid %u\r\n",
-             (long)stim_latest.accel.xyz[2], (long)stim_latest.incl.xyz[2],
-             (int)stim_latest.gyro_temp.xyz[0], (unsigned)stim_latest.latency_us,
-             (unsigned)stim_latest.counter, (unsigned)stim_latest.valid);
-    }
-  }
-  /* USER CODE END 3 */
+	    /* USER CODE BEGIN 3 */
+	    // unreachable: the scheduler runs the tasks after osKernelStart()
+	  }
+	  /* USER CODE END 3 */
 }
 
 /**
@@ -385,7 +408,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Stream1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
 }
@@ -577,6 +600,40 @@ static void stim_feed(const uint8_t *data, uint16_t len) // personal note: i get
 
 /* USER CODE END 4 */
 
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+	  /* USER CODE BEGIN 5 */
+	  // Start STIM reception (moved here from main so it begins once the RTOS is running)
+	  __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);  // throw away the stale byte sitting in RDR
+	  __HAL_UART_CLEAR_OREFLAG(&huart2);                        // clear the overrun flag left over from before
+	  if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, stim_rx, RX_BUF_SIZE) != HAL_OK)
+	  {
+	    printf("DMA start failed\r\n");
+	  }
+
+	  for (;;)
+	  {
+	    osDelay(1000);   // sleep 1 s; the CPU is free for other tasks meanwhile
+
+	    uint32_t n = stim_bytes;  stim_bytes = 0;
+	    uint32_t f = stim_frames; stim_frames = 0;
+	    printf("STIM: %lu bytes/s, %lu frames/s, crc errors: %lu, uart errors: %lu\r\n",
+	           n, f, stim_crc_errors, stim_errors);
+	    printf("  accZ %ld  inclZ %ld  gyroT_X %d  lat %u  cnt %u  valid %u\r\n",
+	           (long)stim_latest.accel.xyz[2], (long)stim_latest.incl.xyz[2],
+	           (int)stim_latest.gyro_temp.xyz[0], (unsigned)stim_latest.latency_us,
+	           (unsigned)stim_latest.counter, (unsigned)stim_latest.valid);
+	  }
+	  /* USER CODE END 5 */
+}
+
  /* MPU Configuration */
 
 void MPU_Config(void)
@@ -604,6 +661,28 @@ void MPU_Config(void)
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
 
 /**

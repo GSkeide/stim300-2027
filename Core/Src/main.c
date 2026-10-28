@@ -62,6 +62,11 @@ typedef struct {
 #define STIM_FRAME_LEN 63
 #define STIM_FRAME_ID 0xAF
 
+//
+#define STIM_S24_SIGN_BIT   (1u << 23)     // sign bit of a 24-bit two's complement value
+#define STIM_S24_EXTEND     0xFF000000u    // bits 31-24: set to 1 for negative values -- sign extension
+
+
 //crc
 #define STIM_CRC_POLY      0x04C11DB7u   // datasheet 6.3.7
 #define STIM_CRC_SEED      0xFFFFFFFFu   // datasheet 6.3.7
@@ -121,6 +126,9 @@ static void MX_USART2_UART_Init(void);
 static void stim_feed(const uint8_t *data, uint16_t len);
 static void stim_decode(const uint8_t *frame, stim_sample_t *out);
 
+static int32_t stim_s24(const uint8_t *p);
+static int16_t stim_s16(const uint8_t *p);
+
 //crc
 static uint32_t stim_crc32_byte(uint32_t crc, uint8_t byte);
 static int stim_frame_crc_ok(const uint8_t *frame);
@@ -176,7 +184,12 @@ int main(void)
   printf("\r\nSTIM300 test start\r\n");   // board booted and printf works
   //crc
   printf("CRC self-test: %s\r\n", stim_frame_crc_ok(stim_test_frame) ? "PASS" : "FAIL");
-
+  printf("s24 test: %ld %ld\r\n", (long)stim_s24(&stim_test_frame[1]), (long)stim_s24(&stim_test_frame[7]));
+  stim_sample_t t;
+  stim_decode(stim_test_frame, &t);
+  printf("decode test: accZ %ld inclZ %ld gyroT_X %d lat %u cnt %u valid %u\r\n",
+         (long)t.accel.xyz[2], (long)t.incl.xyz[2], (int)t.gyro_temp.xyz[0],
+         (unsigned)t.latency_us, (unsigned)t.counter, (unsigned)t.valid);
   // next two lines fixes uart error at startup..
   __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);  // throw away the stale byte sitting in RDR
   __HAL_UART_CLEAR_OREFLAG(&huart2);                        // clear the overrun flag left over from before
@@ -206,6 +219,10 @@ int main(void)
       //crc
       printf("STIM: %lu bytes/s, %lu frames/s, crc errors: %lu, uart errors: %lu\r\n",
              n, f, stim_crc_errors, stim_errors);
+      printf("  accZ %ld  inclZ %ld  gyroT_X %d  lat %u  cnt %u  valid %u\r\n",
+             (long)stim_latest.accel.xyz[2], (long)stim_latest.incl.xyz[2],
+             (int)stim_latest.gyro_temp.xyz[0], (unsigned)stim_latest.latency_us,
+             (unsigned)stim_latest.counter, (unsigned)stim_latest.valid);
     }
   }
   /* USER CODE END 3 */
@@ -393,7 +410,23 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-// Called by HAL (from interrupt) on DMA half-full, DMA full, and UART idle line
+
+static int32_t stim_s24(const uint8_t *p)
+{
+  uint32_t v = ((int32_t)p[0] << 16) | ((int32_t)p[1] << 8) | (int32_t)p[2];  // 0 .. 0xFFFFFF
+  if (v & STIM_S24_SIGN_BIT)    // bit 23 set: the 24-bit value is negative
+  {
+    v |= STIM_S24_EXTEND;            // Sign extension -- pad 1's to bit 31-24 so it's a negative number
+  }
+  return (int32_t)v; // cast signed v
+}
+
+static int16_t stim_s16(const uint8_t *p)
+{
+  uint16_t v = ((uint16_t)p[0] << 8) | (uint16_t)p[1];
+  return (int16_t)v;
+}
+
 // Called by HAL (from interrupt) on DMA half-full, DMA full, and UART idle line
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t pos)
 {
@@ -468,11 +501,33 @@ static int stim_frame_crc_ok(const uint8_t *frame)
 }
 
 // Decode a CRC-verified 0xAF frame (63 bytes) into raw-count fields (Table 6-19)
+// Decode a CRC-verified 0xAF frame (63 bytes) into raw-count fields (Table 6-19)
 static void stim_decode(const uint8_t *frame, stim_sample_t *out)
 {
-  (void)frame;   // remove these two lines when you fill in the body
-  (void)out;
-  // TODO: fill in out->... from frame[...]
+  for (int k = 0; k < 3; k++)   // k = 0, 1, 2 -> X, Y, Z
+  {
+    out->gyro.xyz[k]       = stim_s24(&frame[1 + 3 * k]);
+    out->accel.xyz[k]      = stim_s24(&frame[11 + 3 * k]);
+    out->incl.xyz[k]       = stim_s24(&frame[21 + 3 * k]);
+
+    out->gyro_temp.xyz[k]  = stim_s16(&frame[31 + 2 * k]);
+    out->accel_temp.xyz[k] = stim_s16(&frame[38 + 2 * k]);
+    out->incl_temp.xyz[k]  = stim_s16(&frame[45 + 2 * k]);
+  }
+
+  out->gyro.status       = frame[10];
+  out->accel.status      = frame[20];
+  out->incl.status       = frame[30];
+  out->gyro_temp.status  = frame[37];
+  out->accel_temp.status = frame[44];
+  out->incl_temp.status  = frame[51];
+
+  out->aux        = stim_s24(&frame[52]);
+  out->aux_status = frame[55];
+  out->counter    = frame[56];
+  out->latency_us = (uint16_t)((frame[57]<<8) | frame[58]);
+
+  out->valid = (out->gyro.status | out->accel.status | out->incl.status | out->gyro_temp.status | out->accel_temp.status | out->incl_temp.status | out->aux_status) == 0;
 }
 
 static void new_byte_arrived(const uint8_t data)
